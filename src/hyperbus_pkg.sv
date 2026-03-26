@@ -21,6 +21,12 @@ package hyperbus_pkg;
         logic           phys_in_use;
         logic           which_phy;
         logic [3:0]     t_csh_cycles; //add an configurable Tcsh for high freq operation(200MHz Hyperram)
+        // Per-PHY path-equalization delays (dual-PHY only).
+        // PHY 0 uses t_rx_clk_delay / t_tx_clk_delay above.
+        // PHY 1 uses these two fields so that boards with unequal HyperRAM
+        // trace lengths can be compensated independently.
+        logic [3:0]     t_rx_clk_delay_phy1; // RX RWDS delay for PHY 1
+        logic [3:0]     t_tx_clk_delay_phy1; // TX CK trim delay for PHY 1
     } hyper_cfg_t;
 
     typedef struct packed {
@@ -74,7 +80,11 @@ package hyperbus_pkg;
             address_space:              'b0,
             phys_in_use:                NumPhys-1,
             which_phy:                  NumPhys-1,
-            t_csh_cycles:               'h1
+            t_csh_cycles:               'h1,
+            // PHY 1 path-equalization defaults: symmetric with PHY 0.
+            // t_tx_clk_delay_phy1 = 0 means no additional trim (pass-through).
+            t_rx_clk_delay_phy1:        'h8,
+            t_tx_clk_delay_phy1:        'h0
         };
 
         return cfg;

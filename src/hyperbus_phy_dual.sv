@@ -149,6 +149,22 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     hyper_phy_ca_t ca;
 
     // =========================================================================
+    //  Per-PHY TX clock: PHY 1 can be individually trimmed via
+    //  cfg_i.t_tx_clk_delay_phy1 to compensate for different PCB trace lengths.
+    //  PHY 0 uses clk_i_90 directly (its TX delay is set globally upstream).
+    //  A delay_i of 0 maps to zero additional skew, preserving existing
+    //  behaviour when t_tx_clk_delay_phy1 is left at its reset value of 0.
+    // =========================================================================
+
+    logic clk_i_90_phy1;
+
+    hyperbus_delay i_delay_tx_clk_phy1 (
+        .in_i    ( clk_i_90                     ),
+        .delay_i ( cfg_i.t_tx_clk_delay_phy1    ),
+        .out_o   ( clk_i_90_phy1                )
+    );
+
+    // =========================================================================
     //  TRX control buses (broadcast from single FSM to all active PHYs)
     // =========================================================================
 
@@ -162,6 +178,12 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     logic        trx_rx_clk_set;
     logic        trx_rx_clk_reset;
 
+    // Per-PHY RX RWDS delay: PHY 0 uses t_rx_clk_delay,
+    // PHY 1 uses t_rx_clk_delay_phy1 for independent RWDS timing adjustment.
+    logic [3:0] trx_rx_clk_delay [NumPhys];
+    assign trx_rx_clk_delay[0] = cfg_i.t_rx_clk_delay;
+    assign trx_rx_clk_delay[1] = cfg_i.t_rx_clk_delay_phy1;
+
     // TRX outputs
     logic [15:0] trx_rx_data    [NumPhys];
     logic        trx_rx_valid   [NumPhys];
@@ -172,46 +194,81 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     //  Transceivers — one per PHY, driven by the single FSM
     // =========================================================================
 
-    for (genvar i = 0; i < NumPhys; i++) begin : gen_trx
-        hyperbus_trx #(
-            .IsClockODelayed( IsClockODelayed ),
-            .NumChips       ( NumChips        ),
-            .RxFifoLogDepth ( RxFifoLogDepth  ),
-            .SyncStages     ( SyncStages      )
-        ) i_trx (
-            .clk_i,
-            .clk_i_90,
-            .rst_ni,
-            .test_mode_i,
-            .cs_i               ( cs_q                          ),
-            // CS is only asserted when this PHY is in the active set
-            .cs_ena_i           ( trx_cs_ena & phy_active_q[i]  ),
-            .rwds_sample_o      ( trx_rwds_sample[i]            ),
-            .rwds_sample_ena_i  ( trx_rwds_sample_ena           ),
-            .tx_clk_delay_i     ( cfg_i.t_tx_clk_delay          ),
-            .tx_clk_ena_i       ( trx_clk_ena                   ),
-            .tx_data_i          ( trx_tx_data[i]                ),
-            .tx_data_oe_i       ( trx_tx_data_oe                ),
-            .tx_rwds_i          ( trx_tx_rwds[i]                ),
-            .tx_rwds_oe_i       ( trx_tx_rwds_oe                ),
-            .rx_clk_delay_i     ( cfg_i.t_rx_clk_delay          ),
-            .rx_clk_set_i       ( trx_rx_clk_set                ),
-            .rx_clk_reset_i     ( trx_rx_clk_reset              ),
-            .rx_data_o          ( trx_rx_data[i]                ),
-            .rx_valid_o         ( trx_rx_valid[i]               ),
-            .rx_ready_i         ( trx_rx_ready[i]               ),
-            .hyper_cs_no        ( hyper_cs_no[i]                ),
-            .hyper_ck_o         ( hyper_ck_o[i]                 ),
-            .hyper_ck_no        ( hyper_ck_no[i]                ),
-            .hyper_rwds_o       ( hyper_rwds_o[i]               ),
-            .hyper_rwds_i       ( hyper_rwds_i[i]               ),
-            .hyper_rwds_oe_o    ( hyper_rwds_oe_o[i]            ),
-            .hyper_dq_i         ( hyper_dq_i[i]                 ),
-            .hyper_dq_o         ( hyper_dq_o[i]                 ),
-            .hyper_dq_oe_o      ( hyper_dq_oe_o[i]              ),
-            .hyper_reset_no     ( hyper_reset_no[i]             )
-        );
-    end
+    hyperbus_trx #(
+        .IsClockODelayed( IsClockODelayed ),
+        .NumChips       ( NumChips        ),
+        .RxFifoLogDepth ( RxFifoLogDepth  ),
+        .SyncStages     ( SyncStages      )
+    ) i_trx_phy0 (
+        .clk_i,
+        .clk_i_90,                                    // PHY 0: unmodified TX clock
+        .rst_ni,
+        .test_mode_i,
+        .cs_i               ( cs_q                          ),
+        .cs_ena_i           ( trx_cs_ena & phy_active_q[0]  ),
+        .rwds_sample_o      ( trx_rwds_sample[0]            ),
+        .rwds_sample_ena_i  ( trx_rwds_sample_ena           ),
+        .tx_clk_delay_i     ( cfg_i.t_tx_clk_delay          ),  // informational; applied upstream (clk_i_90)
+        .tx_clk_ena_i       ( trx_clk_ena                   ),
+        .tx_data_i          ( trx_tx_data[0]                ),
+        .tx_data_oe_i       ( trx_tx_data_oe                ),
+        .tx_rwds_i          ( trx_tx_rwds[0]                ),
+        .tx_rwds_oe_i       ( trx_tx_rwds_oe                ),
+        .rx_clk_delay_i     ( trx_rx_clk_delay[0]           ),  // per-PHY RX delay
+        .rx_clk_set_i       ( trx_rx_clk_set                ),
+        .rx_clk_reset_i     ( trx_rx_clk_reset              ),
+        .rx_data_o          ( trx_rx_data[0]                ),
+        .rx_valid_o         ( trx_rx_valid[0]               ),
+        .rx_ready_i         ( trx_rx_ready[0]               ),
+        .hyper_cs_no        ( hyper_cs_no[0]                ),
+        .hyper_ck_o         ( hyper_ck_o[0]                 ),
+        .hyper_ck_no        ( hyper_ck_no[0]                ),
+        .hyper_rwds_o       ( hyper_rwds_o[0]               ),
+        .hyper_rwds_i       ( hyper_rwds_i[0]               ),
+        .hyper_rwds_oe_o    ( hyper_rwds_oe_o[0]            ),
+        .hyper_dq_i         ( hyper_dq_i[0]                 ),
+        .hyper_dq_o         ( hyper_dq_o[0]                 ),
+        .hyper_dq_oe_o      ( hyper_dq_oe_o[0]              ),
+        .hyper_reset_no     ( hyper_reset_no[0]             )
+    );
+
+    hyperbus_trx #(
+        .IsClockODelayed( IsClockODelayed ),
+        .NumChips       ( NumChips        ),
+        .RxFifoLogDepth ( RxFifoLogDepth  ),
+        .SyncStages     ( SyncStages      )
+    ) i_trx_phy1 (
+        .clk_i,
+        .clk_i_90       ( clk_i_90_phy1                ),  // PHY 1: trimmed TX clock
+        .rst_ni,
+        .test_mode_i,
+        .cs_i               ( cs_q                          ),
+        .cs_ena_i           ( trx_cs_ena & phy_active_q[1]  ),
+        .rwds_sample_o      ( trx_rwds_sample[1]            ),
+        .rwds_sample_ena_i  ( trx_rwds_sample_ena           ),
+        .tx_clk_delay_i     ( '0                            ),  // delay already applied via clk_i_90_phy1
+        .tx_clk_ena_i       ( trx_clk_ena                   ),
+        .tx_data_i          ( trx_tx_data[1]                ),
+        .tx_data_oe_i       ( trx_tx_data_oe                ),
+        .tx_rwds_i          ( trx_tx_rwds[1]                ),
+        .tx_rwds_oe_i       ( trx_tx_rwds_oe                ),
+        .rx_clk_delay_i     ( trx_rx_clk_delay[1]           ),  // per-PHY RX delay
+        .rx_clk_set_i       ( trx_rx_clk_set                ),
+        .rx_clk_reset_i     ( trx_rx_clk_reset              ),
+        .rx_data_o          ( trx_rx_data[1]                ),
+        .rx_valid_o         ( trx_rx_valid[1]               ),
+        .rx_ready_i         ( trx_rx_ready[1]               ),
+        .hyper_cs_no        ( hyper_cs_no[1]                ),
+        .hyper_ck_o         ( hyper_ck_o[1]                 ),
+        .hyper_ck_no        ( hyper_ck_no[1]                ),
+        .hyper_rwds_o       ( hyper_rwds_o[1]               ),
+        .hyper_rwds_i       ( hyper_rwds_i[1]               ),
+        .hyper_rwds_oe_o    ( hyper_rwds_oe_o[1]            ),
+        .hyper_dq_i         ( hyper_dq_i[1]                 ),
+        .hyper_dq_o         ( hyper_dq_o[1]                 ),
+        .hyper_dq_oe_o      ( hyper_dq_oe_o[1]              ),
+        .hyper_reset_no     ( hyper_reset_no[1]             )
+    );
 
     // =========================================================================
     //  Per-PHY stream FIFOs
