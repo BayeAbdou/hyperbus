@@ -44,9 +44,13 @@ sources:
       files:
         # Device models. TODO: extend
         - models/s27ks0641/s27ks0641.v
+        # Behavioral HyperBus stub for PHY 1 isolation testing
+        - models/hyperbus_ram_stub.sv
         # Testbench
         - test/fixture_hyperbus.sv
         - test/hyperbus_tb.sv
+        - test/fixture_hyperbus_phy1_stub.sv
+        - test/hyperbus_tb_phy1_stub.sv
         - test/dut_if.sv
         - test/axi_hyper_tb.sv
     - src/hyperbus.sv
