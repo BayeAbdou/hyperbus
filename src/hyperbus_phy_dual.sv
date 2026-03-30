@@ -19,10 +19,9 @@
 // occur between two physically separate HyperBus devices, allowing the
 // combined 32-bit output word to be presented simultaneously.
 //
-// Active-PHY tracking: cfg_i.phys_in_use selects whether one PHY or both are
-// in use.  cfg_i.which_phy selects the single PHY when phys_in_use == 0.
-// The phy_active_q register transitions safely: only when the FSM is in Idle,
-// no B-response is pending, and all outstanding read words have been consumed.
+// Both PHYs are always active: the per-register PHY-switching mechanism
+// (cfg_i.phys_in_use / cfg_i.which_phy) is intentionally not implemented
+// here.  Every transaction uses both PHY 0 and PHY 1 simultaneously.
 
 module hyperbus_phy_dual import hyperbus_pkg::*; #(
     parameter int unsigned IsClockODelayed = -1,
@@ -79,21 +78,6 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     localparam int unsigned NumPhys = 2;
 
     // =========================================================================
-    //  Active-PHY tracking
-    //  phy_active_q[i] == 1 means PHY i participates in the current/next
-    //  transaction.  Transitions are gated to safe points only.
-    // =========================================================================
-
-    logic [NumPhys-1:0] phy_enable;
-    logic [NumPhys-1:0] phy_active_q, phy_active_d;
-    logic               change_phy_active;
-
-    // Desired active set as determined by configuration
-    assign phy_enable        = cfg_i.phys_in_use ? 2'b11
-                                                  : (2'b01 << cfg_i.which_phy);
-    assign change_phy_active = (phy_active_q != phy_enable);
-
-    // =========================================================================
     //  FSM state
     // =========================================================================
 
@@ -112,23 +96,6 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     logic [RxFifoLogDepth:0] r_outstand_q;
     logic                    r_outstand_inc;
     logic                    r_outstand_dec;
-
-    // Transition phy_active_q only when the module is fully idle so that no
-    // in-flight transaction is disrupted.
-    assign phy_active_d = (change_phy_active &&
-                           (state_q == Idle)  &&
-                           ~b_pending_q       &&
-                           (r_outstand_q == '0)) ? phy_enable : phy_active_q;
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin : proc_ff_phy_active
-        if (!rst_ni) phy_active_q <= 2'b11;
-        else         phy_active_q <= phy_active_d;
-    end
-
-    // Number of active PHYs derived from phy_active_q (not directly from cfg)
-    // so that burst accounting matches which PHYs are actually running.
-    logic [1:0] phys_in_use;
-    assign phys_in_use = (&phy_active_q) ? 2'd2 : 2'd1;
 
     // =========================================================================
     //  Auxiliary control signals
@@ -165,7 +132,7 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     );
 
     // =========================================================================
-    //  TRX control buses (broadcast from single FSM to all active PHYs)
+    //  TRX control buses (broadcast from single FSM to both PHYs)
     // =========================================================================
 
     logic        trx_clk_ena;
@@ -205,7 +172,7 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
         .rst_ni,
         .test_mode_i,
         .cs_i               ( cs_q                          ),
-        .cs_ena_i           ( trx_cs_ena & phy_active_q[0]  ),
+        .cs_ena_i           ( trx_cs_ena                   ),
         .rwds_sample_o      ( trx_rwds_sample[0]            ),
         .rwds_sample_ena_i  ( trx_rwds_sample_ena           ),
         .tx_clk_delay_i     ( cfg_i.t_tx_clk_delay          ),  // informational; applied upstream (clk_i_90)
@@ -243,7 +210,7 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
         .rst_ni,
         .test_mode_i,
         .cs_i               ( cs_q                          ),
-        .cs_ena_i           ( trx_cs_ena & phy_active_q[1]  ),
+        .cs_ena_i           ( trx_cs_ena                   ),
         .rwds_sample_o      ( trx_rwds_sample[1]            ),
         .rwds_sample_ena_i  ( trx_rwds_sample_ena           ),
         .tx_clk_delay_i     ( '0                            ),  // delay already applied via clk_i_90_phy1
@@ -319,24 +286,24 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     //  RX data path
     // =========================================================================
 
-    // Combined valid: every active PHY's FIFO must have a word ready
+    // Combined valid: both PHYs' FIFOs must have a word ready
     logic rx_both_valid;
-    assign rx_both_valid = &(fifo_out_valid | ~phy_active_q);
+    assign rx_both_valid = &fifo_out_valid;
 
     assign rx_valid_o = rx_both_valid;
     assign rx_data_o  = {fifo_out_data[1].data, fifo_out_data[0].data};
-    // OR the error flags from all active PHYs (mirrors original hyperbus_phy_if behaviour)
-    assign rx_error_o = | ({fifo_out_data[1].error, fifo_out_data[0].error} & phy_active_q);
+    // OR the error flags from both PHYs
+    assign rx_error_o = fifo_out_data[1].error | fifo_out_data[0].error;
     // rx_last_o is derived directly from FSM state so it is correctly aligned
     // with the combined stream-FIFO output (no need to store it in the FIFOs).
     assign rx_last_o  = (state_q != Read) & ctl_tf_burst_done & (r_outstand_q == 1);
 
-    // Drain all active PHYs' stream FIFOs simultaneously when the consumer reads
+    // Drain both PHYs' stream FIFOs simultaneously when the consumer reads
     always_comb begin : proc_comb_rx_ready
         fifo_out_ready = '0;
         if (rx_both_valid && rx_ready_i) begin
-            fifo_out_ready[0] = phy_active_q[0];
-            fifo_out_ready[1] = phy_active_q[1];
+            fifo_out_ready[0] = 1'b1;
+            fifo_out_ready[1] = 1'b1;
         end
     end
 
@@ -413,14 +380,16 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     // =========================================================================
 
     assign ctl_write_zero_lat = tf_q.address_space & tf_q.write;
-    // Use the OR of all active PHYs' RWDS samples: if either device requires
+    // Use the OR of both PHYs' RWDS samples: if either device requires
     // additional latency we honour it.  cfg_i.en_latency_additional is the
     // software-controlled override.
-    assign ctl_add_latency    = (trx_rwds_sample[0] & phy_active_q[0])
-                              | (trx_rwds_sample[1] & phy_active_q[1])
+    assign ctl_add_latency    = trx_rwds_sample[0]
+                              | trx_rwds_sample[1]
                               | cfg_i.en_latency_additional;
 
-    assign ctl_tf_burst_last  = (tf_q.burst == 1) || (tf_q.burst == phys_in_use);
+    // Burst terminates when count == 1 (single word remaining) or == 2
+    // (will be decremented to 0 by the -2 step, so this is the last beat).
+    assign ctl_tf_burst_last  = (tf_q.burst == 1) || (tf_q.burst == 2);
     assign ctl_tf_burst_done  = (tf_q.burst == 0);
 
     assign ctl_timer_rwr_done = (timer_q <= 3);
@@ -433,9 +402,8 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
     // =========================================================================
     //  Single shared FSM
     //  Logic is intentionally identical to hyperbus_phy with the following
-    //  differences:
-    //   • trans_ready_o is also blocked during a phy_active transition
-    //   • tf_d.burst decrements by phys_in_use (1 or 2) per clock
+    //  difference:
+    //   • tf_d.burst always decrements by 2 (both PHYs active)
     // =========================================================================
 
     always_comb begin : proc_comb_phy_fsm
@@ -466,11 +434,10 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
             Idle: begin
                 trx_cs_ena = 1'b0;
                 timer_d    = timer_q;
-                // Block new transactions when a B-response is still pending,
-                // when read data has not been fully consumed, or while the
-                // active-PHY set is being changed.
-                trans_ready_o = ~b_pending_q & (r_outstand_q == '0) & ~change_phy_active;
-                if (trans_valid_i & ~b_pending_q & (r_outstand_q == '0) & ~change_phy_active) begin
+                // Block new transactions when a B-response is still pending
+                // or when read data has not been fully consumed.
+                trans_ready_o = ~b_pending_q & (r_outstand_q == '0);
+                if (trans_valid_i & ~b_pending_q & (r_outstand_q == '0)) begin
                     tf_d           = trans_i;
                     cs_d           = trans_cs_i;
                     timer_d        = 2;
@@ -517,7 +484,7 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
                 if (ctl_rclk_ena) begin
                     trx_clk_ena    = 1'b1;
                     r_outstand_inc = 1'b1;
-                    tf_d.burst     = tf_q.burst - phys_in_use;
+                    tf_d.burst     = tf_q.burst - 2;
                     tf_d.address   = tf_q.address + 1;
                     if (ctl_tf_burst_last) begin
                         timer_d = cfg_i.t_csh_cycles;
@@ -535,7 +502,7 @@ module hyperbus_phy_dual import hyperbus_pkg::*; #(
                 trx_tx_rwds_oe = ~ctl_write_zero_lat;
                 if (ctl_wclk_ena) begin
                     trx_clk_ena  = 1'b1;
-                    tf_d.burst   = tf_q.burst - phys_in_use;
+                    tf_d.burst   = tf_q.burst - 2;
                     tf_d.address = tf_q.address + 1;
                     if (ctl_tf_burst_last) begin
                         b_pending_set = 1'b1;
