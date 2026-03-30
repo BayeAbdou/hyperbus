@@ -264,8 +264,11 @@ module hyperbus_phy import hyperbus_pkg::*; #(
             Idle: begin
                 trx_cs_ena  = 1'b0;
                 timer_d     = timer_q;
-                // Signal ready for, pop next transfer if Write response sent
-                 trans_ready_o   = 1'b1;
+                // Signal ready only when no B response is pending and all read
+                // data has been consumed; this ensures that when 2 PHYs are
+                // used, neither PHY accepts a new transaction before the other
+                // is also fully ready, preventing FSM desynchronization.
+                trans_ready_o   = ~b_pending_q & (r_outstand_q == '0);
                 if (trans_valid_i & ~b_pending_q & r_outstand_q == '0) begin
                     tf_d    = trans_i;
                     cs_d    = trans_cs_i;
