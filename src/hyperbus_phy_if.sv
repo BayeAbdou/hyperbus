@@ -61,65 +61,43 @@ module hyperbus_phy_if import hyperbus_pkg::*; #(
 
       logic [NumPhys-1:0][1:0]     fifo_axi_usage;
 
-      logic                        tx_both_ready, ts_both_ready;
-      logic                        rx_both_valid, b_both_valid;
-
-      logic [NumPhys-1:0]          phy_tx_ready;
-      logic                        phy_tx_valid;
-
-      logic [NumPhys-1:0]          phy_trans_ready;
-      logic [NumPhys-1:0]          phy_trans_valid;
-
-      logic [NumPhys-1:0]          phy_b_valid;
-      logic [NumPhys-1:0]          phy_b_error;
-      logic                        phy_b_ready;
+      logic                        rx_both_valid;
 
       genvar                          i;
       generate
 
          if (NumPhys==2) begin : phy_wrap
 
-            logic [NumPhys-1:0] phy_enable;
-            logic [NumPhys-1:0] phy_busy;
-            logic [NumPhys-1:0] phy_active_q, phy_active_d;
-            logic               change_phy_active;
+                  // Both PHYs are always simultaneously active in the dual configuration.
+            // A single shared FSM (hyperbus_phy_dual) drives both transceivers
+            // to prevent FSM desynchronization.
 
-            assign change_phy_active = phy_active_q != phy_enable;
-            assign phy_enable        = cfg_i.phys_in_use ? '1 : (1 << cfg_i.which_phy);
-            assign phy_active_d      = change_phy_active && fifo_axi_usage == '0 ?
-                                       phy_enable | phy_busy : phy_active_q;
+            logic [1:0][15:0] phy_dual_rx_data;
+            logic [1:0]       phy_dual_rx_error;
+            logic [1:0]       phy_dual_rx_last;
+            logic             phy_dual_tx_ready;
+            logic             phy_dual_trans_ready;
+            logic             phy_dual_b_valid;
+            logic             phy_dual_b_error;
 
-            always_ff @(posedge clk_i or negedge rst_ni ) begin
-                if (!rst_ni) begin
-                    phy_active_q <= '1;
-                end else begin
-                    phy_active_q <= phy_active_d;
-                end
-            end
-
-            assign rx_both_valid  = & (fifo_axi_valid | ~phy_active_q);
+            // Both FIFOs must be valid before presenting data to upstream
+            assign rx_both_valid  = & fifo_axi_valid;
             assign rx_valid_o     = rx_both_valid;
             assign fifo_axi_ready = rx_ready_i && rx_both_valid;
 
-            assign rx_o.error    = | ({fifo_axi_rx[1].error, fifo_axi_rx[0].error} & phy_active_q);
-            assign rx_o.last     = & ({fifo_axi_rx[1].last, fifo_axi_rx[0].last} | ~phy_active_q);
-            assign tx_both_ready = & (phy_tx_ready | ~phy_active_q);
-            assign tx_ready_o    = tx_both_ready;
-            assign phy_tx_valid  = tx_both_ready && tx_valid_i;
+            assign rx_o.error    = fifo_axi_rx[0].error | fifo_axi_rx[1].error;
+            assign rx_o.last     = fifo_axi_rx[0].last & fifo_axi_rx[1].last;
 
-            assign b_both_valid = & (phy_b_valid | ~phy_active_q);
-            assign b_valid_o    = b_both_valid;
-            assign phy_b_ready  = b_ready_i && b_both_valid;
-            assign b_error_o    = | (phy_b_error & phy_active_q);
-
-            assign ts_both_ready = change_phy_active ? '0 :
-                                    & (phy_trans_ready | ~phy_active_q);
-            assign trans_ready_o = ts_both_ready;
-            assign phy_trans_valid = change_phy_active ? '0 :
-                                     phy_trans_ready & {NumPhys{trans_valid_i}} & phy_active_q;
+            assign tx_ready_o    = phy_dual_tx_ready;
+            assign trans_ready_o = phy_dual_trans_ready;
+            assign b_valid_o     = phy_dual_b_valid;
+            assign b_error_o     = phy_dual_b_error;
 
             for ( i=0; i<NumPhys;i++) begin : phy_unroll
                assign rx_o.data[i*16 +:16] = fifo_axi_rx[i].data;
+               assign phy_fifo_rx[i] = '{data:  phy_dual_rx_data[i],
+                                         error: phy_dual_rx_error[i],
+                                         last:  phy_dual_rx_last[i]};
 
                stream_fifo #(
                    .FALL_THROUGH ( 1'b0        ),
@@ -138,58 +116,53 @@ module hyperbus_phy_if import hyperbus_pkg::*; #(
                    .valid_o        ( fifo_axi_valid[i] ),
                    .ready_i        ( fifo_axi_ready    )
                );
-
-
-               hyperbus_phy #(
-                   .IsClockODelayed( IsClockODelayed   ),
-                   .NumChips       ( NumChips          ),
-                   .StartupCycles  ( StartupCycles     ),
-                   .NumPhys        ( NumPhys           ),
-                   .SyncStages     ( SyncStages        )
-               ) i_phy (
-                   .clk_i          ( clk_i             ),
-                   .clk_i_90       ( clk_i_90          ),
-                   .rst_ni         ( rst_ni            ),
-                   .test_mode_i    ( test_mode_i       ),
-
-                   .cfg_i          ( cfg_i             ),
-
-                   .busy_o         ( phy_busy[i]       ),
-
-                   .rx_data_o      ( phy_fifo_rx[i].data  ),
-                   .rx_last_o      ( phy_fifo_rx[i].last  ),
-                   .rx_error_o     ( phy_fifo_rx[i].error ),
-                   .rx_valid_o     ( phy_fifo_valid[i]    ),
-                   .rx_ready_i     ( phy_fifo_ready[i]    ),
-
-                   .tx_data_i      ( tx_i.data[16*i +:16] ),
-                   .tx_strb_i      ( tx_i.strb[2*i   +:2] ),
-                   .tx_last_i      ( tx_i.last            ),
-                   .tx_valid_i     ( phy_tx_valid         ),
-                   .tx_ready_o     ( phy_tx_ready[i]      ),
-
-                   .b_error_o      ( phy_b_error[i]       ),
-                   .b_valid_o      ( phy_b_valid[i]       ),
-                   .b_ready_i      ( phy_b_ready          ),
-
-                   .trans_i        ( trans_i              ),
-                   .trans_cs_i     ( trans_cs_i           ),
-                   .trans_valid_i  ( phy_trans_valid[i]   ),
-                   .trans_ready_o  ( phy_trans_ready[i]   ),
-
-                   .hyper_cs_no    ( hyper_cs_no[i]       ),
-                   .hyper_ck_o     ( hyper_ck_o[i]        ),
-                   .hyper_ck_no    ( hyper_ck_no[i]       ),
-                   .hyper_rwds_o   ( hyper_rwds_o[i]      ),
-                   .hyper_rwds_i   ( hyper_rwds_i[i]      ),
-                   .hyper_rwds_oe_o( hyper_rwds_oe_o[i]   ),
-                   .hyper_dq_i     ( hyper_dq_i[i]        ),
-                   .hyper_dq_o     ( hyper_dq_o[i]        ),
-                   .hyper_dq_oe_o  ( hyper_dq_oe_o[i]     ),
-                   .hyper_reset_no ( hyper_reset_no[i]    )
-               );
-
             end // for ( i=0; i<NumPhys;i++)
+
+            hyperbus_phy_dual #(
+                .IsClockODelayed ( IsClockODelayed ),
+                .NumChips        ( NumChips        ),
+                .StartupCycles   ( StartupCycles   ),
+                .SyncStages      ( SyncStages      )
+            ) i_phy_dual (
+                .clk_i,
+                .clk_i_90,
+                .rst_ni,
+                .test_mode_i,
+
+                .cfg_i,
+
+                .trans_valid_i  ( trans_valid_i         ),
+                .trans_ready_o  ( phy_dual_trans_ready  ),
+                .trans_i        ( trans_i               ),
+                .trans_cs_i     ( trans_cs_i            ),
+
+                .tx_valid_i     ( tx_valid_i            ),
+                .tx_ready_o     ( phy_dual_tx_ready     ),
+                .tx_data_i      ( tx_i.data             ),
+                .tx_strb_i      ( tx_i.strb             ),
+                .tx_last_i      ( tx_i.last             ),
+
+                .rx_valid_o     ( phy_fifo_valid        ),
+                .rx_ready_i     ( phy_fifo_ready        ),
+                .rx_data_o      ( phy_dual_rx_data      ),
+                .rx_error_o     ( phy_dual_rx_error     ),
+                .rx_last_o      ( phy_dual_rx_last      ),
+
+                .b_valid_o      ( phy_dual_b_valid      ),
+                .b_ready_i      ( b_ready_i             ),
+                .b_error_o      ( phy_dual_b_error      ),
+
+                .hyper_cs_no,
+                .hyper_ck_o,
+                .hyper_ck_no,
+                .hyper_rwds_o,
+                .hyper_rwds_i,
+                .hyper_rwds_oe_o,
+                .hyper_dq_i,
+                .hyper_dq_o,
+                .hyper_dq_oe_o,
+                .hyper_reset_no
+            );
          end else begin // if (NumPhys==2)
 
             hyperbus_phy #(
