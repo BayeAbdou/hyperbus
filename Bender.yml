@@ -37,6 +37,7 @@ sources:
     - src/hyperbus_trx.sv
     - src/hyperbus_cfg_regs.sv
     - src/hyperbus_phy.sv
+    - src/hyperbus_phy_dual.sv
     - src/hyperbus_phy_if.sv
     - src/hyperbus_axi.sv
     - target: hyper_test
