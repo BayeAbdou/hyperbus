@@ -156,13 +156,22 @@ module hyperbus_phy import hyperbus_pkg::*; #(
     // ==============
 
     // Command-address
+    // When both PHYs are active (phys_in_use==2), trans_o.address is a chip-word
+    // address (byte_addr >> 2). The HyperBus CA encodes half-word addresses where
+    // CA[2:1] = lower column address and CA[0] = byte select within half-word.
+    // We must shift the chip-word address left by 1 to place it into the half-word
+    // address field (CA[2:1]) and keep CA[0] = 0. Without this, odd chip-word
+    // addresses set CA[0]=1, causing the memory to start from the wrong byte offset.
+    logic [31:0] ca_address;
+    assign ca_address = (phys_in_use == 2) ? {tf_q.address[30:0], 1'b0} : tf_q.address;
+
     assign ca = hyper_phy_ca_t '{
         write:      ~tf_q.write,
         addr_space: tf_q.address_space,
         burst_type: tf_q.burst_type,
-        addr_upper: tf_q.address[31:3],
+        addr_upper: ca_address[31:3],
         reserved:   '0,
-        addr_lower: tf_q.address[2:0]
+        addr_lower: ca_address[2:0]
     };
 
     // Write dataflow
